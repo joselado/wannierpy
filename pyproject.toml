@@ -3,7 +3,7 @@ requires = ["setuptools>=61", "numpy>=1.26", "meson>=1.1", "ninja"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wannier90py"
+name = "wannierpy"
 version = "0.1.0"
 description = "Python bindings for the Wannier90 library-mode API (wannier_setup/wannier_run)"
 readme = "README.md"

@@ -1,4 +1,4 @@
-# wannier90py
+# wannierpy
 
 Python bindings for [Wannier90](http://www.wannier.org)'s "library mode" API
 -- the `wannier_setup`/`wannier_run` Fortran subroutines in
