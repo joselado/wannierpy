@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61", "numpy>=1.26", "meson>=1.1", "ninja"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wannier90py"
+version = "0.1.0"
+description = "Python bindings for the Wannier90 library-mode API (wannier_setup/wannier_run)"
+readme = "README.md"
+license = { text = "GPL-2.0-only" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["wannier90*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
