@@ -1,10 +1,9 @@
 # Examples
 
-Four self-contained scripts, one per dimensionality, each defining a
-hard-coded tight-binding Bloch Hamiltonian and computing the `M_matrix`/
-`A_matrix`/`eigenvalues` overlap data `wannier90.run()` needs directly from
-it (no `.mmn`/`.amn`/`.eig` files, no DFT interface) -- see `_tb_utils.py`
-for how, and why.
+Five self-contained scripts, each defining (or importing) a Bloch
+Hamiltonian and computing the `M_matrix`/`A_matrix`/`eigenvalues` overlap
+data `wannier90.run()` needs directly from it (no `.mmn`/`.amn`/`.eig`
+files, no DFT interface) -- see `_tb_utils.py` for how, and why.
 
 | Script | System |
 |---|---|
@@ -12,6 +11,7 @@ for how, and why.
 | `1d_ssh_chain.py` | Su-Schrieffer-Heeger dimerized chain (2 orbitals/cell) |
 | `2d_square_lattice.py` | Two-orbital checkerboard-like square lattice |
 | `3d_cubic_lattice.py` | Two-orbital CsCl-like simple cubic lattice |
+| `pyqula_ladder.py` | Lowest band of a two-leg ladder, Hamiltonian imported from [pyqula](https://github.com/joselado/pyqula) |
 
 Run any of them directly:
 
@@ -46,16 +46,40 @@ Wannier centre/spread formulas to extract *position* information from, so
 while it correctly exercises the full pipeline, the reported centres don't
 resolve individual site positions -- see its module docstring.
 
+`pyqula_ladder.py` is different again: it pre-selects a genuine subset of
+bands (the lowest of 2, via `build_overlaps`'s `band_indices` -- the
+manual equivalent of Wannier90's `exclude_bands`) rather than keeping the
+full manifold, which is *not* subject to the same "any fixed trial
+trivially collapses" algebra -- and yet it *still* converges to exactly
+zero spread, this time for a genuine physical reason (the ladder's
+leg-exchange symmetry pins the lowest band's Bloch eigenvector to be
+exactly k-independent) rather than an algebraic one. See its own module
+docstring for the full explanation, including why the reported rung-axis
+centre is always 0 regardless of the true (a)symmetry of the state -- a
+ladder is only periodic along its length, so there's no b-vector across
+the rungs for the centre formula to extract that information from.
+
 ## Adapting these
 
-To Wannierize your own hard-coded Hamiltonian: write `hamiltonian_k(k_frac)
--> Hermitian ndarray` in the "periodic gauge" (hoppings enter only via
-`exp(i*2*pi*k.R)` for integer lattice vectors `R`, no sub-cell position
-phases), then call `_tb_utils.build_overlaps` with it. If you want
-genuinely non-trivial spreads (not the "complete manifold" zero-spread
-case above), use real disentanglement: make your Hamiltonian bigger than
-`num_wann` bands, with a genuinely entangled (not simply weakly/linearly
-perturbed) coupling between the bands you keep and the ones you don't --
-weak or perturbative coupling to a well-separated extra band, or a single
-k-point, both still admit an exact zero-spread answer for the reasons
-above.
+To Wannierize your own Hamiltonian -- hard-coded or, like
+`pyqula_ladder.py`, from another package's Bloch Hamiltonian generator:
+write/obtain `hamiltonian_k(k_frac) -> Hermitian ndarray` in the "periodic
+gauge" (hoppings enter only via `exp(i*2*pi*k.R)` for integer lattice
+vectors `R`, no sub-cell position phases -- true of `pyqula`'s
+`h.get_hk_gen()`, and of most other tight-binding packages' Bloch
+generators too), then call `_tb_utils.build_overlaps` with it. Two
+independent knobs there are worth knowing about:
+
+- `band_indices` pre-selects a subset of bands at every k (the manual
+  equivalent of Wannier90's `exclude_bands`) instead of keeping the full
+  local Hilbert space -- unlike the full-manifold case, this genuinely can
+  give non-trivial spreads for a fixed trial (`trial_vectors`), though it
+  isn't guaranteed to (see `pyqula_ladder.py` for a case where it still
+  comes out exactly zero, for a real physical -- not algebraic -- reason).
+- If you want genuinely non-trivial spreads and don't already have a
+  natural band subset to select, real disentanglement is the other route:
+  make your Hamiltonian bigger than `num_wann` bands, with a genuinely
+  entangled (not simply weakly/perturbatively coupled, and not a single
+  k-point) coupling between the bands you keep and the ones you don't --
+  see `_tb_utils.py`'s module docstring for why weaker attempts still tend
+  to land on an exact zero-spread answer for simple/smooth toy models.

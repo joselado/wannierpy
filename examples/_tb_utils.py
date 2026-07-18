@@ -110,19 +110,23 @@ def gaussian_trial_matrix(k_frac: np.ndarray, orbital_positions_frac: np.ndarray
 def build_overlaps(hamiltonian_k, num_orbitals: int, kpt_latt: np.ndarray, nnlist: np.ndarray,
                     orbital_positions_frac: np.ndarray | None = None,
                     trial_positions_frac: np.ndarray | None = None,
-                    trial_widths=None, periodic_dims=None):
+                    trial_widths=None, periodic_dims=None, band_indices=None,
+                    trial_vectors: np.ndarray | None = None):
     """Diagonalize ``hamiltonian_k`` at every k-point and build the overlap
     data :func:`wannier90.run` needs.
 
     Parameters
     ----------
     hamiltonian_k : callable(k_frac) -> (num_orbitals, num_orbitals) complex ndarray
-        The hard-coded Bloch Hamiltonian (periodic-gauge convention, see
-        module docstring), evaluated at one fractional k-point at a time.
+        The Bloch Hamiltonian (periodic-gauge convention, see module
+        docstring), evaluated at one fractional k-point at a time -- can be
+        a hard-coded model, or an external one (e.g. ``h.get_hk_gen()``
+        from a `pyqula <https://github.com/joselado/pyqula>`_ Hamiltonian).
     num_orbitals : int
-        Tight-binding orbitals per unit cell -- equal to both ``num_bands``
-        and ``num_wann`` in every example here (no disentanglement needed:
-        every orbital becomes one Wannier function).
+        Tight-binding orbitals per unit cell -- the dimension
+        ``hamiltonian_k`` returns. Equal to ``num_bands``; equal to
+        ``num_wann`` too (no disentanglement: every orbital becomes one
+        Wannier function) unless ``band_indices`` selects a subset.
     kpt_latt : (3, num_kpts) ndarray
         Fractional k-points, exactly what was passed to ``wannier90.setup``.
     nnlist : (num_kpts, nntot) ndarray, 1-indexed
@@ -130,7 +134,7 @@ def build_overlaps(hamiltonian_k, num_orbitals: int, kpt_latt: np.ndarray, nnlis
     orbital_positions_frac : (num_orbitals, 3) ndarray, optional
         Fractional intra-cell position of each orbital. Needed for
         ``trial_positions_frac`` (distances are measured from these), and
-        also regauges ``M_matrix`` itself (``C(k) -> D(k) C(k)`` with
+        also regauges the eigenvectors (``C(k) -> D(k) C(k)`` with
         ``D(k) = diag(exp(i 2*pi k . tau_m))``) so the reported Wannier
         centres are directly comparable to real atomic positions rather
         than always landing on the cell origin.
@@ -138,43 +142,86 @@ def build_overlaps(hamiltonian_k, num_orbitals: int, kpt_latt: np.ndarray, nnlis
         Real-space Gaussian trial orbitals -- see
         :func:`gaussian_trial_matrix` and the module docstring. Omit all
         three ``trial_*``/``periodic_dims`` arguments for the trivial
-        "trial = exact orbital basis" choice (identically zero spread
+        "trial = exact orbital/band basis" choice (identically zero spread
         whenever ``num_wann == num_bands``, see module docstring -- not
         useful except to demonstrate that fact).
     periodic_dims : sequence of int, optional
         Which axes (0, 1, 2) are actually periodic -- required together
         with the ``trial_*`` arguments. E.g. ``[0]`` for a 1D chain along
         x, ``[0, 1]`` for a 2D sheet in the xy-plane.
+    band_indices : sequence of int, optional
+        Pre-select a subset of the ``num_orbitals`` bands at every k-point
+        (0-indexed into ``eigh``'s ascending output, e.g. ``[0]`` for just
+        the lowest band) *before* building any overlaps -- the manual
+        analogue of Wannier90's ``exclude_bands``, useful when you already
+        know which bands you want and don't need the disentanglement
+        machinery to find a subspace for you. ``num_wann`` (and
+        ``M_matrix``'s/``eigenvalues``'s size) becomes ``len(band_indices)``
+        instead of ``num_orbitals`` -- still ``num_wann == num_bands`` as
+        far as :func:`wannier90.run` is concerned, since the excluded bands
+        were never handed to it in the first place. Requires an explicit
+        trial (``trial_vectors`` or ``trial_widths``): unlike the full,
+        untruncated manifold (see above), a genuine subset of bands is
+        *not* degenerate for a fixed trial -- ``C(k)`` is then a
+        rectangular isometry, not a square unitary, so the "``W(k)``
+        collapses to a constant" argument above no longer applies -- but
+        there's also no single obvious default to fall back to.
+    trial_vectors : (num_orbitals, num_wann) ndarray, optional
+        A simple *fixed* (k-independent) trial matrix, as an alternative to
+        the k-dependent Gaussian envelope (``trial_widths``) -- fine (not
+        degenerate) whenever ``band_indices`` selects a genuine subset of
+        ``num_orbitals`` (see above), but falls back into the same
+        "identically zero spread" case as a fixed ``trial_widths``-free
+        choice if ``band_indices`` is left at the full manifold.
 
     Returns
     -------
-    M_matrix : (num_orbitals, num_orbitals, nntot, num_kpts) complex
-    A_matrix : (num_orbitals, num_wann, num_kpts) complex
-    eigenvalues : (num_orbitals, num_kpts) real
+    M_matrix : (num_selected, num_selected, nntot, num_kpts) complex
+    A_matrix : (num_selected, num_wann, num_kpts) complex
+    eigenvalues : (num_selected, num_kpts) real
     """
     num_kpts = kpt_latt.shape[1]
     nntot = nnlist.shape[1]
 
-    C = np.empty((num_orbitals, num_orbitals, num_kpts), dtype=complex)
-    eigenvalues = np.empty((num_orbitals, num_kpts))
+    C_full = np.empty((num_orbitals, num_orbitals, num_kpts), dtype=complex)
+    eig_full = np.empty((num_orbitals, num_kpts))
     for k in range(num_kpts):
         H = np.asarray(hamiltonian_k(kpt_latt[:, k]), dtype=complex)
         if not np.allclose(H, H.conj().T, atol=1e-10):
             raise ValueError(f"hamiltonian_k(k={kpt_latt[:, k]}) is not Hermitian")
         w, v = np.linalg.eigh(H)
-        eigenvalues[:, k] = w
-        C[:, :, k] = v
+        eig_full[:, k] = w
+        C_full[:, :, k] = v
 
     if orbital_positions_frac is not None:
         tau = np.asarray(orbital_positions_frac, dtype=np.float64)  # (num_orbitals, 3)
         phase = np.exp(1j * 2 * np.pi * (tau @ kpt_latt))  # (num_orbitals, num_kpts)
-        C *= phase[:, None, :]  # regauge row m (orbital m) by its own position phase at each k
+        C_full *= phase[:, None, :]  # regauge row m (orbital m) by its own position phase at each k
 
-    num_wann = num_orbitals if trial_widths is None else len(trial_widths)
-    M_matrix = np.empty((num_orbitals, num_orbitals, nntot, num_kpts), dtype=complex)
-    A_matrix = np.empty((num_orbitals, num_wann, num_kpts), dtype=complex)
+    if band_indices is not None:
+        C = C_full[:, list(band_indices), :]
+        eigenvalues = eig_full[list(band_indices), :]
+    else:
+        C = C_full
+        eigenvalues = eig_full
+    num_selected = C.shape[1]
+
+    if band_indices is not None and trial_widths is None and trial_vectors is None:
+        raise ValueError(
+            "build_overlaps: band_indices selects a genuine subset of bands, which has no "
+            "single obvious default trial -- pass trial_vectors (fixed) or trial_widths "
+            "(k-dependent Gaussian envelope) explicitly"
+        )
+
+    num_wann = num_selected if trial_widths is None else len(trial_widths)
+    if trial_vectors is not None:
+        num_wann = np.asarray(trial_vectors).shape[1]
+    M_matrix = np.empty((num_selected, num_selected, nntot, num_kpts), dtype=complex)
+    A_matrix = np.empty((num_selected, num_wann, num_kpts), dtype=complex)
     for k in range(num_kpts):
-        if trial_widths is not None:
+        if trial_vectors is not None:
+            A_matrix[:, :, k] = C[:, :, k].conj().T @ trial_vectors
+        elif trial_widths is not None:
             A_matrix[:, :, k] = C[:, :, k].conj().T @ gaussian_trial_matrix(
                 kpt_latt[:, k], orbital_positions_frac, trial_positions_frac, trial_widths, periodic_dims
             )
