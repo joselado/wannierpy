@@ -72,7 +72,9 @@ print(run_result.wann_centres, run_result.wann_spreads)
 (reciprocal-lattice) coordinates, shape `(3, num_kpts)`. See
 `tests/test_engine_run.py` (pure Python) or `tests/test_gaas.py` (Fortran)
 for complete runnable examples using the GaAs case shipped with upstream
-Wannier90.
+Wannier90, or `examples/` for four self-contained, hard-coded
+tight-binding models (0D/1D/2D/3D) that build `M_matrix`/`A_matrix`
+directly from a Bloch Hamiltonian instead of reading `.mmn`/`.amn` files.
 
 ## Everything through memory
 
