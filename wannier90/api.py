@@ -61,6 +61,20 @@ class WannierError(RuntimeError):
     """Raised when the underlying wannier90 call fails or aborts."""
 
 
+def _resolve_backend(backend: str | None) -> str:
+    """``backend=`` explicit arg > ``WANNIER90_BACKEND`` env var > "fortran".
+
+    ``"fortran"`` is the compiled f2py extension (the only backend with full
+    feature coverage today); ``"python"`` is the pure-Python port (see
+    ``wannier90._engine`` -- ported incrementally, unimplemented paths raise
+    ``NotImplementedError`` rather than silently returning wrong results).
+    """
+    resolved = backend or os.environ.get("WANNIER90_BACKEND", "fortran")
+    if resolved not in ("fortran", "python"):
+        raise ValueError(f"backend must be 'fortran' or 'python', got {resolved!r}")
+    return resolved
+
+
 @dataclass
 class SetupResult:
     nntot: int
@@ -86,7 +100,15 @@ class SetupResult:
     _setup_args: tuple = field(default=None, repr=False)
     """The exact positional arguments passed to ``wannier_setup``. Used to
     replay the call inside :func:`run`'s worker subprocess; not part of the
-    public result -- don't rely on its contents."""
+    public result -- don't rely on its contents. Only set for
+    ``backend="fortran"``."""
+    backend: str = "fortran"
+    """Which backend produced this result -- ``run()`` defaults to the same
+    backend unless overridden."""
+    _engine_state: dict = field(default=None, repr=False)
+    """Internal python-backend state (k-mesh, parsed params) passed through
+    to :func:`run` so it doesn't need to recompute or replay anything; not
+    part of the public result. Only set for ``backend="python"``."""
 
 
 @dataclass
@@ -181,13 +203,23 @@ def setup(
     win_keywords: dict | None = None,
     exclude_bands=None,
     projections=None,
+    slwf_centres=None,
     recip_lattice=None,
     gamma_only: bool = False,
     spinors: bool = False,
     cwd: str | None = None,
     in_process: bool = False,
+    backend: str | None = None,
 ) -> SetupResult:
     """Call ``wannier_setup``.
+
+    ``backend`` selects ``"fortran"`` (the compiled extension, default) or
+    ``"python"`` (the pure-Python port, see ``wannier90._engine`` -- ported
+    incrementally, may raise ``NotImplementedError`` for paths not yet
+    written). The python backend takes ``win_keywords``/``exclude_bands``/
+    ``projections`` directly as Python objects and never touches disk for
+    them -- ``cwd``/``in_process`` are ignored (both are Fortran-subprocess
+    concerns).
 
     wannier90 still needs a ``<cwd>/<seedname>.win`` on disk for the
     algorithmic parameters that have no argument here -- ``num_wann``,
@@ -214,21 +246,7 @@ def setup(
     ``real_lattice``/``atoms_cart`` are in Angstrom; ``kpt_latt`` is in
     fractional (reciprocal-lattice) coordinates, shape ``(3, num_kpts)``.
     """
-    if cwd is None:
-        cwd = tempfile.mkdtemp(prefix="wannier90_")
-    else:
-        os.makedirs(cwd, exist_ok=True)
-
-    win_path = os.path.join(cwd, f"{seedname}.win")
-    if win_keywords is not None or exclude_bands is not None or projections is not None:
-        write_win(win_path, keywords=win_keywords, exclude_bands=exclude_bands, projections=projections)
-    elif not os.path.exists(win_path):
-        raise WannierError(
-            f"No {win_path} and no win_keywords/exclude_bands/projections given -- "
-            "either pass those (at minimum win_keywords={'num_wann': ...}) or write "
-            f"{seedname}.win into cwd yourself before calling setup()."
-        )
-
+    backend = _resolve_backend(backend)
     real_lattice = np.asarray(real_lattice, dtype=np.float64)
     if recip_lattice is None:
         recip_lattice = reciprocal_lattice(real_lattice)
@@ -236,6 +254,60 @@ def setup(
     kpt_latt = np.asarray(kpt_latt, dtype=np.float64)
     atoms_cart = np.asarray(atoms_cart, dtype=np.float64)
     mp_grid = np.asarray(mp_grid, dtype=np.int32)
+
+    if backend == "python":
+        from . import _engine
+
+        out = _engine.wannier_setup(
+            mp_grid, kpt_latt, real_lattice, recip_lattice, int(num_bands_tot),
+            atom_symbols, atoms_cart, gamma_only=bool(gamma_only), spinors=bool(spinors),
+            win_keywords=win_keywords, exclude_bands=exclude_bands, projections=projections,
+            slwf_centres=slwf_centres,
+        )
+        proj = out["projections"]
+        if proj:
+            proj_site = np.array([p.site_frac for p in proj]).T
+            proj_l = np.array([p.l for p in proj], dtype=np.int64)
+            proj_m = np.array([p.m for p in proj], dtype=np.int64)
+            proj_radial = np.array([p.radial for p in proj], dtype=np.int64)
+            proj_z = np.array([p.z_axis for p in proj]).T
+            proj_x = np.array([p.x_axis for p in proj]).T
+            proj_zona = np.array([p.zona for p in proj])
+            if spinors:
+                proj_s = np.array([p.spin for p in proj], dtype=np.int64)
+                proj_s_qaxis = np.array([p.s_qaxis for p in proj]).T
+            else:
+                proj_s, proj_s_qaxis = np.zeros(0, dtype=np.int64), np.zeros((3, 0))
+        else:
+            proj_site = proj_z = proj_x = np.zeros((3, 0))
+            proj_l = proj_m = proj_radial = np.zeros(0, dtype=np.int64)
+            proj_zona = np.zeros(0)
+            proj_s, proj_s_qaxis = np.zeros(0, dtype=np.int64), np.zeros((3, 0))
+        return SetupResult(
+            nntot=int(out["nntot"]), nnlist=out["nnlist"], nncell=out["nncell"],
+            num_bands=int(out["num_bands"]), num_wann=int(out["num_wann"]),
+            proj_site=proj_site, proj_l=proj_l, proj_m=proj_m, proj_radial=proj_radial,
+            proj_z=proj_z, proj_x=proj_x, proj_zona=proj_zona,
+            exclude_bands=out["exclude_bands"], proj_s=proj_s, proj_s_qaxis=proj_s_qaxis,
+            cwd=None, backend="python", _engine_state=out,
+        )
+
+    if cwd is None:
+        cwd = tempfile.mkdtemp(prefix="wannier90_")
+    else:
+        os.makedirs(cwd, exist_ok=True)
+
+    win_path = os.path.join(cwd, f"{seedname}.win")
+    if win_keywords is not None or exclude_bands is not None or projections is not None:
+        write_win(win_path, keywords=win_keywords, exclude_bands=exclude_bands, projections=projections,
+                  slwf_centres=slwf_centres)
+    elif not os.path.exists(win_path):
+        raise WannierError(
+            f"No {win_path} and no win_keywords/exclude_bands/projections given -- "
+            "either pass those (at minimum win_keywords={'num_wann': ...}) or write "
+            f"{seedname}.win into cwd yourself before calling setup()."
+        )
+
     symbols = _pad_symbols(atom_symbols)
 
     args = (
@@ -270,17 +342,79 @@ def run(
     gamma_only: bool = False,
     cwd: str | None = None,
     in_process: bool = False,
+    backend: str | None = None,
+    dmn=None,
 ) -> RunResult:
     """Call ``wannier_run``.
 
     ``setup_result`` must be the :class:`SetupResult` from the matching
     :func:`setup` call (its ``nnlist``/``nncell`` are what you used to build
-    ``M_matrix`` via :func:`wannier90.io_helpers.read_mmn`, and -- in
-    subprocess mode -- it's also what lets this call correctly replay
-    ``wannier_setup`` in the worker before calling ``wannier_run``; see the
-    module docstring). ``cwd`` defaults to ``setup_result.cwd``, so the
-    ``.win`` that :func:`setup` wrote (or found) is still there.
+    ``M_matrix`` via :func:`wannier90.io_helpers.read_mmn``). For
+    ``backend="fortran"`` (default) -- in subprocess mode -- it's also what
+    lets this call correctly replay ``wannier_setup`` in the worker before
+    calling ``wannier_run``; see the module docstring. ``cwd`` defaults to
+    ``setup_result.cwd``, so the ``.win`` that :func:`setup` wrote (or
+    found) is still there.
+
+    ``backend`` defaults to whichever backend produced ``setup_result``
+    (mixing backends between ``setup()``/``run()`` isn't supported: the
+    python backend threads internal state through ``SetupResult``, and the
+    fortran backend threads Fortran module-global state through the
+    subprocess replay).
+
+    ``dmn`` enables site symmetry (``lsitesymmetry``), ``backend="python"``
+    only -- for ``backend="fortran"`` this is unused: put ``site_symmetry =
+    .true.`` in the ``.win`` and the matching ``.dmn`` file next to it (same
+    ``cwd``/seedname convention as everything else that backend reads off
+    disk), and the Fortran extension loads it itself. ``dmn`` accepts a path
+    to a ``.dmn`` file (read via :func:`wannier90.io_helpers.read_dmn`), an
+    already-parsed :class:`wannier90.io_helpers.DmnData`, or an already-built
+    :class:`wannier90._engine.sitesym.SymmetryData` -- not supported together
+    with frozen-window disentanglement (``dis_froz_min``/``dis_froz_max``),
+    matching upstream ("frozen window not implemented yet in
+    symmetry-adapted mode").
     """
+    backend = _resolve_backend(backend if backend is not None else setup_result.backend)
+
+    if backend == "python":
+        from . import _engine
+        from . import io_helpers
+        from ._engine.sitesym import SymmetryData, from_dmn
+
+        if setup_result._engine_state is None:
+            raise ValueError(
+                "run(backend='python') requires a SetupResult produced by "
+                "setup(backend='python') -- got one from the fortran backend"
+            )
+        sym = None
+        if dmn is not None:
+            if isinstance(dmn, SymmetryData):
+                sym = dmn
+            else:
+                if isinstance(dmn, (str, os.PathLike)):
+                    dmn = io_helpers.read_dmn(dmn, num_wann=setup_result.num_wann)
+                sym = from_dmn(dmn, setup_result.num_wann)
+        real_lattice = np.asarray(real_lattice, dtype=np.float64)
+        if recip_lattice is None:
+            recip_lattice = reciprocal_lattice(real_lattice)
+        out = _engine.wannier_run(
+            mp_grid=np.asarray(mp_grid, dtype=np.int32), kpt_latt=np.asarray(kpt_latt, dtype=np.float64),
+            real_lattice=real_lattice, recip_lattice=np.asarray(recip_lattice, dtype=np.float64),
+            atom_symbols=atom_symbols, atoms_cart=np.asarray(atoms_cart, dtype=np.float64),
+            gamma_only=bool(gamma_only), M_matrix=np.asarray(M_matrix, dtype=np.complex128),
+            A_matrix=np.asarray(A_matrix, dtype=np.complex128),
+            eigenvalues=np.asarray(eigenvalues, dtype=np.float64),
+            engine_state=setup_result._engine_state,
+            sym=sym,
+        )
+        return RunResult(**out)
+
+    if dmn is not None:
+        raise NotImplementedError(
+            "run(dmn=...) is only implemented for backend='python' -- for backend='fortran', "
+            "put site_symmetry = .true. in the .win and the matching .dmn file in cwd instead"
+        )
+
     if cwd is None:
         cwd = setup_result.cwd
     real_lattice = np.asarray(real_lattice, dtype=np.float64)

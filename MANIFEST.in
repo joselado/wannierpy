@@ -1,0 +1,13 @@
+# setuptools' default sdist file-finding picked up most tests/*.py files but
+# silently dropped tests/conftest.py (no __init__.py makes `tests` not a
+# "package" for [tool.setuptools.packages.find] to find, and whatever
+# heuristic caught the test_*.py files alongside it didn't match conftest.py)
+# -- most test_engine_*.py files import shared fixtures from it, so without
+# this the bundled tests fail with an ImportError for anyone building from
+# the sdist. Being explicit here instead of relying on that heuristic.
+recursive-include tests *.py
+
+# scripts/build_fortran_extension.py and wannier90.pyf are intentionally
+# *not* included -- the PyPI release is pure-Python-only by design (see
+# README.md's "Optional: Fortran backend" section); building that backend
+# requires a git clone, not just the sdist.

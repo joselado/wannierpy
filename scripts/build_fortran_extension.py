@@ -1,24 +1,36 @@
-"""Custom build: compile libwannier.a from the (vendored or sibling) Wannier90
-3.1.0 source tree, then build the f2py extension against it and drop the
-result into the wannier90 package directory.
+#!/usr/bin/env python3
+"""Build the optional Fortran backend (``wannier90._wannier90``) and drop it
+into the installed (or in-place) ``wannier90/`` package directory.
 
-f2py's own ``-c`` mode already drives an internal meson build for the
-extension itself; hand-writing a parallel top-level meson.build to redo the
-same work (and re-derive the libwannier.a compile step, which is really just
-"run the existing upstream Makefile") would duplicate that machinery for no
-benefit, so this just automates the exact commands used (and verified) while
-developing this package.
+The PyPI release of this package (``pip install wannierpy``) is pure Python
+-- it never runs this. Use this script if you specifically want
+``backend="fortran"``, which requires:
+
+* a local checkout of this repo (this script isn't shipped in the PyPI
+  sdist/wheel -- get it from git),
+* a gfortran + LAPACK/BLAS toolchain (e.g. on Debian/Ubuntu:
+  ``apt install gfortran libblas-dev liblapack-dev``),
+* the Wannier90 3.1.0 source tree, found in this order: the
+  ``WANNIER90_SRC`` environment variable, ``vendor/wannier90-3.1.0/`` next
+  to this repo, or a ``wannier90-3.1.0/`` sibling directory next to it.
+
+Usage::
+
+    pip install -e .                        # editable install of the pure-Python package first
+    WANNIER90_SRC=/path/to/wannier90-3.1.0 python scripts/build_fortran_extension.py
+
+This is the same build ``setup.py`` ran automatically before the package
+switched to a pure-Python-by-default PyPI release -- see git history for
+that version if you're looking for the previous all-in-one behaviour.
 """
+from __future__ import annotations
+
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from setuptools import setup
-from setuptools.command.build_py import build_py as _build_py
-
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent.parent
 VENDORED_SRC = HERE / "vendor" / "wannier90-3.1.0"
 
 
@@ -86,17 +98,21 @@ def _build_extension(libwannier: Path, build_dir: Path) -> Path:
     return matches[0]
 
 
-class BuildWannier90(_build_py):
-    def run(self):
-        super().run()
-        root = _find_wannier90_root()
-        libwannier = _build_libwannier(root)
-        temp_dir = Path(self.build_lib).resolve().parent / "temp_f2py_wannier90"
-        so_path = _build_extension(libwannier, temp_dir)
-        target_dir = Path(self.build_lib) / "wannier90"
-        target_dir.mkdir(parents=True, exist_ok=True)
+def main() -> None:
+    import shutil
+    import tempfile
+
+    import wannier90  # fail fast with a clear error if the package itself isn't installed
+
+    root = _find_wannier90_root()
+    print(f"Using Wannier90 source at {root}")
+    libwannier = _build_libwannier(root)
+    with tempfile.TemporaryDirectory(prefix="f2py_wannier90_") as tmp:
+        so_path = _build_extension(libwannier, Path(tmp))
+        target_dir = Path(wannier90.__file__).resolve().parent
         shutil.copy(so_path, target_dir / so_path.name)
+        print(f"Installed {so_path.name} into {target_dir}")
 
 
 if __name__ == "__main__":
-    setup(cmdclass={"build_py": BuildWannier90})
+    main()
