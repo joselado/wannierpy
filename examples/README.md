@@ -1,6 +1,6 @@
 # Examples
 
-Five self-contained scripts, each defining (or importing) a Bloch
+Six self-contained scripts, each defining (or importing) a Bloch
 Hamiltonian and computing the `M_matrix`/`A_matrix`/`eigenvalues` overlap
 data `wannier90.run()` needs directly from it (no `.mmn`/`.amn`/`.eig`
 files, no DFT interface) -- see `_tb_utils.py` for how, and why.
@@ -12,6 +12,7 @@ files, no DFT interface) -- see `_tb_utils.py` for how, and why.
 | `2d_square_lattice.py` | Two-orbital checkerboard-like square lattice |
 | `3d_cubic_lattice.py` | Two-orbital CsCl-like simple cubic lattice |
 | `pyqula_ladder.py` | Lowest band of a two-leg ladder, Hamiltonian imported from [pyqula](https://github.com/joselado/pyqula) |
+| `pyqula_ladder_both_bands.py` | Same ladder, both bands (contrast with the single-band case above) |
 
 Run any of them directly:
 
@@ -58,6 +59,12 @@ docstring for the full explanation, including why the reported rung-axis
 centre is always 0 regardless of the true (a)symmetry of the state -- a
 ladder is only periodic along its length, so there's no b-vector across
 the rungs for the centre formula to extract that information from.
+
+`pyqula_ladder_both_bands.py` Wannierizes both of the ladder's bands
+instead (`num_wann == num_bands == 2`) -- back to the "complete manifold"
+case, so it uses the same Gaussian-trial-orbital, before/after pattern as
+the 1D/2D/3D examples (and shares the same rung-axis centre caveat as
+`pyqula_ladder.py`, for the same reason).
 
 ## Adapting these
 
